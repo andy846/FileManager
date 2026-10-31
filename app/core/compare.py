@@ -2,6 +2,7 @@
 
 import os
 import stat
+import threading
 from dataclasses import dataclass, field
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -10,6 +11,8 @@ from app.core.hashing import hash_file
 from app.core.transfer import copy_file
 from app.core.utils import extended_path, send_to_trash
 from app.core.workers import CancelledError, OperationControl
+
+_MIRROR_DELETE_LOCK = threading.Lock()
 
 STATUS_SAME = "same"
 STATUS_ONLY_LEFT = "only_left"
@@ -230,6 +233,30 @@ def _roots_overlap(left, right):
     return common in (left, right)
 
 
+def _snapshot_delete_target(path, control=None):
+    """Capture target identities and metadata without traversing links."""
+    result = []
+    pending = [(path, "")]
+    while pending:
+        if control is not None:
+            control.wait_if_paused()
+            control.checkpoint()
+        current, relative = pending.pop()
+        info = os.lstat(extended_path(current))
+        attrs = getattr(info, "st_file_attributes", 0)
+        if stat.S_ISLNK(info.st_mode) or attrs & getattr(
+                stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
+            raise OSError("鏡像刪除目標包含連結或重新剖析點")
+        result.append((relative, info.st_dev, info.st_ino, info.st_mode,
+                       info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+        if stat.S_ISDIR(info.st_mode):
+            with os.scandir(extended_path(current)) as entries:
+                for entry in entries:
+                    pending.append((os.path.join(current, entry.name),
+                                    os.path.join(relative, entry.name)))
+    return tuple(sorted(result))
+
+
 def build_sync_plan(result, direction, entries=None, include_only=True,
                     include_newer=True, include_diff=True, mirror=False):
     """Build copy/mkdir/delete actions for one sync direction.
@@ -328,9 +355,14 @@ def build_sync_plan(result, direction, entries=None, include_only=True,
 
     if mirror:
         for path in _minimal_paths(target_only):
+            try:
+                snapshot = _snapshot_delete_target(path)
+            except OSError as exc:
+                raise ValueError(f"無法檢查鏡像刪除目標: {exc}") from exc
             actions.append(_action(
                 action="delete", dst=path,
                 relative=os.path.relpath(path, target_root),
+                target_snapshot=snapshot,
             ))
 
     actions.sort(key=lambda item: (
@@ -381,15 +413,7 @@ class SyncWorker(QThread):
                         )
                         summary["copied"] += 1
                     elif kind == "delete":
-                        reason = _validate_delete_target(action)
-                        if reason:
-                            summary["failed"] += 1
-                            summary["errors"].append(
-                                (action["dst"], reason))
-                            self.progress.emit(
-                                index, total, action.get("relative", kind))
-                            continue
-                        ok, error = send_to_trash(action["dst"])
+                        ok, error = _execute_mirror_delete(action, self.control)
                         if ok:
                             summary["deleted"] += 1
                         else:
@@ -407,6 +431,35 @@ class SyncWorker(QThread):
         except CancelledError:
             summary["cancelled"] = True
         self.completed.emit(summary)
+
+
+def _execute_mirror_delete(action, control):
+    while True:
+        control.wait_if_paused()
+        control.checkpoint()
+        if _MIRROR_DELETE_LOCK.acquire(timeout=0.1):
+            break
+    try:
+        control.checkpoint()
+        reason = _validate_delete_target(action)
+        if reason:
+            return False, reason
+        expected = action.get("target_snapshot")
+        if expected is None:
+            return False, "缺少刪除目標預覽資訊，已拒絕鏡像刪除"
+        try:
+            current = _snapshot_delete_target(action["dst"], control)
+        except OSError:
+            return False, "刪除目標已無法檢查，已拒絕鏡像刪除"
+        if current != expected:
+            return False, "刪除目標自預覽後已變更，已拒絕鏡像刪除"
+        reason = _validate_delete_target(action)
+        if reason:
+            return False, reason
+        control.checkpoint()
+        return send_to_trash(action["dst"])
+    finally:
+        _MIRROR_DELETE_LOCK.release()
 
 
 def _validate_delete_target(action):

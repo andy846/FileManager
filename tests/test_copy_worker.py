@@ -68,8 +68,9 @@ def test_scan_worker_reports_failure(app, tmp_path):
 
 
 def _run_process(worker, task):
-    worker._process(task, threading.Lock(), threading.Lock(),
-                    {"done": 0, "skipped": 0, "failed": 0, "bytes": 0})
+    worker._process(task, threading.Lock(),
+                    {"done": 0, "skipped": 0, "failed": 0,
+                     "cancelled": 0, "bytes": 0})
     return task
 
 

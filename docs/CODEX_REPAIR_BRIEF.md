@@ -28,6 +28,30 @@
 6. **Sync guard:** when mirror is requested, rescan or validate the source immediately before deletion; if source or target becomes unreadable, abort deletion. Confirm that destructive sync actions cannot target the source tree.
 7. **Reporting:** completed task status must be `failed` when any file failed; `cancelled` when cancellation occurred; exported audit must list every operation with its final outcome.
 
+## Phase 2 — implemented (this follow-up)
+
+- [x] Commit-time conflict revalidation in `app/core/transfer.py`
+      (`_commit_file`): skip never overwrites, rename reserves a unique name
+      under lock, overwrite backups under the same lock; `os.rename`
+      no-clobber closes the external-writer race.
+- [x] Move semantics: cancellation checkpoints around cross-volume
+      copy-then-remove; failed/interrupted moves keep at least one copy.
+- [x] Destructive audit: `delete_files` returns cancelled paths, remover
+      logs all three outcomes (TXT/CSV/XLSX), task status reflects
+      cancellation, and counts reconcile with the original work list.
+- [x] Remover scanner surfaces unreadable-directory errors instead of
+      silently skipping them.
+- [x] Archive hardening: Windows reserved names / trailing dot-space
+      rejection, per-member stream size enforcement, per-member error
+      containment, and preservation of prior ZIP on failure/cancel.
+- [x] Sync guard: mirror deletes re-validate source/target accessibility
+      and realpath containment immediately before execution.
+- [x] Shutdown discovery: `MainWindow._running_threads()` also scans every
+      widget (dialogs included), not only page-owned QThreads.
+- [x] Copier cancellation accounting: all futures drain to completion,
+      cancelled tasks are classified separately, and done+skipped+failed+
+      cancelled reconcile to the total.
+
 ## Acceptance criteria
 
 - Run `python -m pytest -q` and `python -m ruff check app` on Windows 11 (Python 3.11, `QT_QPA_PLATFORM=offscreen`).

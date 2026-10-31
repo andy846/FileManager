@@ -11,6 +11,7 @@ class ScannerWorker(QThread):
     progress = pyqtSignal(str)
     file_found = pyqtSignal(object)
     scan_complete = pyqtSignal(list)
+    scan_warnings = pyqtSignal(int)
     error = pyqtSignal(str)
 
     def __init__(self, folder, extensions, filters, recursive=True):
@@ -30,14 +31,17 @@ class ScannerWorker(QThread):
 
     def run(self):
         try:
+            scan_errors = []
             results = scan_files(
                 self.folder, self.extensions, self.filters,
                 recursive=self.recursive,
                 progress_callback=lambda c: self.progress.emit(f"已掃描 {c} 個項目"),
                 file_found_callback=lambda info: self.file_found.emit(info),
                 cancel_check=self._check,
+                on_error=lambda path, error: scan_errors.append((path, error)),
             )
             self.scan_complete.emit(results)
+            self.scan_warnings.emit(len(scan_errors))
         except CancelledError:
             self.scan_complete.emit([])
         except Exception as exc:
@@ -48,7 +52,7 @@ class DeletionWorker(QThread):
     progress = pyqtSignal(int, int)
     file_deleted = pyqtSignal(str)
     file_failed = pyqtSignal(str, str)
-    delete_complete = pyqtSignal(list, list)
+    delete_complete = pyqtSignal(list, list, list)
 
     def __init__(self, files, permanent=False, threads=None):
         super().__init__()
@@ -65,7 +69,7 @@ class DeletionWorker(QThread):
             raise CancelledError("刪除已取消")
 
     def run(self):
-        deleted, failed = delete_files(
+        deleted, failed, cancelled = delete_files(
             self.files,
             cancel_check=self._check,
             progress_callback=lambda d, t: self.progress.emit(d, t),
@@ -73,5 +77,6 @@ class DeletionWorker(QThread):
             file_failed_callback=lambda p, e: self.file_failed.emit(p, e),
             permanent=self.permanent,
             threads=self.threads,
+            include_cancelled=True,
         )
-        self.delete_complete.emit(deleted, failed)
+        self.delete_complete.emit(deleted, failed, cancelled)

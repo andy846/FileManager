@@ -31,7 +31,8 @@ class LogManager:
         )
 
     def save_logs(self, folder, extensions, deleted, failed, started, finished,
-                  size_freed=None):
+                  size_freed=None, cancelled=None):
+        cancelled = list(cancelled or [])
         ts = self.generate_timestamp()
         txt, csvf, xlsxf = self._paths(f"deletion_log_{ts}")
         if size_freed is None:
@@ -55,10 +56,13 @@ class LogManager:
                     f.write(f"{tr('已刪除')}: {p}\n")
                 for p, err in failed:
                     f.write(f"{tr('失敗')}: {p} ({err})\n")
+                for p in cancelled:
+                    f.write(f"{tr('已取消')}: {p}\n")
                 f.write("-" * 40 + "\n")
                 f.write(
                     f"{tr('成功')}: {len(deleted)} | "
                     f"{tr('失敗')}: {len(failed)} | "
+                    f"{tr('已取消')}: {len(cancelled)} | "
                     f"{tr('釋放空間')}: {size_freed} {tr('位元組')}\n"
                 )
         except Exception:
@@ -73,6 +77,8 @@ class LogManager:
                     w.writerow([tr("已刪除"), p, ""])
                 for p, err in failed:
                     w.writerow([tr("失敗"), p, err])
+                for p in cancelled:
+                    w.writerow([tr("已取消"), p, ""])
         except Exception:
             pass
 
@@ -103,6 +109,10 @@ class LogManager:
                 ws.cell(row=r, column=2, value=p)
                 ws.cell(row=r, column=3, value=err)
                 r += 1
+            for p in cancelled:
+                ws.cell(row=r, column=1, value=tr("已取消"))
+                ws.cell(row=r, column=2, value=p)
+                r += 1
             for col in ("A", "B", "C"):
                 ws.column_dimensions[col].width = 60 if col != "A" else 12
 
@@ -114,6 +124,7 @@ class LogManager:
                 (tr("副檔名"), ", ".join(extensions) or tr("全部")),
                 (tr("成功數量"), len(deleted)),
                 (tr("失敗數量"), len(failed)),
+                (tr("取消數量"), len(cancelled)),
                 (tr("釋放空間 (位元組)"), size_freed),
             ]
             for i, (k, v) in enumerate(rows, 1):

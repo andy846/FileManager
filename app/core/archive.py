@@ -1,6 +1,7 @@
 """Safe ZIP / TAR archive helpers (standard library only)."""
 
 import os
+import re
 import stat
 import tarfile
 import tempfile
@@ -12,6 +13,10 @@ from app.core.workers import CancelledError
 
 MAX_EXTRACT_BYTES = 10 * 1024 ** 3
 MAX_RATIO = 500
+
+_WINDOWS_RESERVED = re.compile(
+    r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$", re.IGNORECASE
+)
 
 
 @dataclass
@@ -80,6 +85,10 @@ def sanitize_member(name):
         return None
     if any(":" in part for part in parts):
         return None
+    if any(_WINDOWS_RESERVED.match(part) for part in parts):
+        return None
+    if any(part != part.rstrip(" .") for part in parts):
+        return None
     return "/".join(parts)
 
 
@@ -108,12 +117,13 @@ def _check_bomb(path, members):
         raise ValueError("壓縮比異常，已拒絕解壓（可能的 zip bomb）")
 
 
-def _write_stream_atomically(source, target, control=None):
+def _write_stream_atomically(source, target, control=None, max_bytes=None):
     """Write one member to a unique sibling temp file and replace on success."""
     folder = os.path.dirname(target) or "."
     fd, temp = tempfile.mkstemp(prefix=".fm-extract-", suffix=".part", dir=folder)
     try:
         with os.fdopen(fd, "wb") as output:
+            written = 0
             while True:
                 if control is not None:
                     control.wait_if_paused()
@@ -121,6 +131,11 @@ def _write_stream_atomically(source, target, control=None):
                 chunk = source.read(1024 * 1024)
                 if not chunk:
                     break
+                written += len(chunk)
+                if max_bytes is not None and written > max_bytes:
+                    raise ValueError("壓縮成員超過宣告大小，已中止解壓")
+                if written > MAX_EXTRACT_BYTES:
+                    raise ValueError("壓縮成員超過安全大小上限，已中止解壓")
                 output.write(chunk)
         if control is not None:
             control.checkpoint()
@@ -157,19 +172,31 @@ def extract_archive(path, dest, members=None, overwrite=False,
                         summary["skipped"] += 1
                         continue
                     if member.is_dir:
-                        os.makedirs(target, exist_ok=True)
+                        try:
+                            os.makedirs(target, exist_ok=True)
+                        except (OSError, ValueError) as exc:
+                            summary["failed"] += 1
+                            summary["errors"].append((member.name, str(exc)))
                     else:
                         if os.path.lexists(target) and not overwrite:
                             summary["skipped"] += 1
                         else:
-                            os.makedirs(os.path.dirname(target) or dest,
-                                        exist_ok=True)
-                            if _safe_target(dest, member.name) != target:
-                                summary["skipped"] += 1
-                                continue
-                            with archive.open(member.name) as source:
-                                _write_stream_atomically(source, target, control)
-                            summary["extracted"] += 1
+                            try:
+                                os.makedirs(os.path.dirname(target) or dest,
+                                            exist_ok=True)
+                                if _safe_target(dest, member.name) != target:
+                                    summary["skipped"] += 1
+                                    continue
+                                with archive.open(member.name) as source:
+                                    _write_stream_atomically(
+                                        source, target, control,
+                                        max_bytes=member.size,
+                                    )
+                                summary["extracted"] += 1
+                            except (OSError, ValueError, RuntimeError) as exc:
+                                summary["failed"] += 1
+                                summary["errors"].append(
+                                    (member.name, str(exc)))
                     if progress is not None:
                         progress(index, total, member.name)
         else:
@@ -184,23 +211,35 @@ def extract_archive(path, dest, members=None, overwrite=False,
                         summary["skipped"] += 1
                         continue
                     if info.isdir():
-                        os.makedirs(target, exist_ok=True)
+                        try:
+                            os.makedirs(target, exist_ok=True)
+                        except (OSError, ValueError) as exc:
+                            summary["failed"] += 1
+                            summary["errors"].append((member.name, str(exc)))
                     else:
                         if os.path.lexists(target) and not overwrite:
                             summary["skipped"] += 1
                         else:
-                            os.makedirs(os.path.dirname(target) or dest,
-                                        exist_ok=True)
-                            if _safe_target(dest, member.name) != target:
-                                summary["skipped"] += 1
-                                continue
-                            source = archive.extractfile(info)
-                            if source is None:
-                                summary["skipped"] += 1
-                                continue
-                            with source:
-                                _write_stream_atomically(source, target, control)
-                            summary["extracted"] += 1
+                            try:
+                                os.makedirs(os.path.dirname(target) or dest,
+                                            exist_ok=True)
+                                if _safe_target(dest, member.name) != target:
+                                    summary["skipped"] += 1
+                                    continue
+                                source = archive.extractfile(info)
+                                if source is None:
+                                    summary["skipped"] += 1
+                                    continue
+                                with source:
+                                    _write_stream_atomically(
+                                        source, target, control,
+                                        max_bytes=info.size,
+                                    )
+                                summary["extracted"] += 1
+                            except (OSError, ValueError, RuntimeError) as exc:
+                                summary["failed"] += 1
+                                summary["errors"].append(
+                                    (member.name, str(exc)))
                     if progress is not None:
                         progress(index, total, member.name)
     except CancelledError:
@@ -222,7 +261,13 @@ def create_zip(output, sources, control=None, progress=None):
         if not os.path.isdir(source):
             continue
         parent = os.path.dirname(source.rstrip("\\/"))
-        for root, dirs, files in os.walk(source):
+        def _record_walk_error(error):
+            summary["failed"] += 1
+            summary["errors"].append(
+                (getattr(error, "filename", source), str(error))
+            )
+
+        for root, dirs, files in os.walk(source, onerror=_record_walk_error):
             if control is not None:
                 control.checkpoint()
             dirs[:] = [
@@ -244,7 +289,7 @@ def create_zip(output, sources, control=None, progress=None):
     folder = os.path.dirname(output) or "."
     os.makedirs(folder, exist_ok=True)
     summary = {"added": 0, "failed": 0, "output": output,
-               "cancelled": False, "committed": False}
+               "cancelled": False, "committed": False, "errors": []}
     fd, temp = tempfile.mkstemp(prefix=".fm-zip-", suffix=".part", dir=folder)
     os.close(fd)
     try:
@@ -256,8 +301,9 @@ def create_zip(output, sources, control=None, progress=None):
                 try:
                     archive.write(path, arcname=arcname)
                     summary["added"] += 1
-                except Exception:
+                except Exception as exc:
                     summary["failed"] += 1
+                    summary["errors"].append((path, str(exc)))
                 if progress is not None:
                     progress(index, len(entries), path)
         if control is not None:

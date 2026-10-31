@@ -357,6 +357,28 @@ def test_mirror_delete_rejects_target_escape(tmp_path, monkeypatch):
     assert outside.exists()
 
 
+def test_mirror_delete_rejects_new_source_file(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "new.txt").write_text("new source")
+    victim = target / "new.txt"
+    victim.write_text("existing target")
+    import app.core.compare as compare_module
+
+    monkeypatch.setattr(compare_module, "send_to_trash", lambda _: pytest.fail("delete"))
+    worker = SyncWorker([{
+        "action": "delete", "dst": str(victim), "relative": "new.txt",
+        "source_root": str(source), "target_root": str(target),
+    }])
+    summaries = []
+    worker.completed.connect(summaries.append)
+    worker.run()
+    assert summaries[0]["failed"] == 1
+    assert victim.read_text() == "existing target"
+
+
 def test_cancelled_extraction_keeps_original_file(tmp_path):
     archive_path = tmp_path / "new.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:

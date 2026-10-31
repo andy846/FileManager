@@ -441,4 +441,14 @@ def _validate_delete_target(action):
             return "刪除目標指向來源資料夾，已拒絕刪除"
     except ValueError:
         return "路徑位於不同磁碟，已拒絕刪除"
+    relative = os.path.relpath(os.path.abspath(path), os.path.abspath(target_root))
+    source_path = os.path.join(source_root, relative)
+    try:
+        os.lstat(extended_path(source_path))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return "無法確認來源項目，已拒絕鏡像刪除"
+    else:
+        return "來源項目已存在，已拒絕鏡像刪除"
     return ""

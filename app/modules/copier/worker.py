@@ -85,7 +85,9 @@ class TransferWorker(BaseWorker):
                     if self.options.get("to_trash_on_overwrite", False):
                         ok, err = send_to_trash(dst)
                         if not ok:
-                            self.emit_log(f"無法送入資源回收筒: {dst} ({err})")
+                            raise RuntimeError(
+                                f"無法備份原檔至資源回收筒，已拒絕覆寫: {dst} ({err})"
+                            )
 
             verify = self.options.get(
                 "verify_mode", self.options.get("verify", "quick")

@@ -219,6 +219,17 @@ def _minimal_paths(paths):
     return selected
 
 
+def _roots_overlap(left, right):
+    """Reject identical, nested, or junction-aliased sync roots."""
+    left = os.path.normcase(os.path.realpath(os.path.abspath(left)))
+    right = os.path.normcase(os.path.realpath(os.path.abspath(right)))
+    try:
+        common = os.path.commonpath((left, right))
+    except ValueError:  # Different Windows drives.
+        return False
+    return common in (left, right)
+
+
 def build_sync_plan(result, direction, entries=None, include_only=True,
                     include_newer=True, include_diff=True, mirror=False):
     """Build copy/mkdir/delete actions for one sync direction.
@@ -228,6 +239,12 @@ def build_sync_plan(result, direction, entries=None, include_only=True,
     """
     if direction not in ("l2r", "r2l"):
         raise ValueError("direction must be l2r or r2l")
+    if _roots_overlap(result.left, result.right):
+        raise ValueError("同步來源與目標不可相同、互相包含或指向同一位置")
+    if mirror and result.errors:
+        raise ValueError(
+            f"資料夾比對有 {result.errors} 個無法讀取項目，已禁止鏡像刪除"
+        )
     target_root = result.right if direction == "l2r" else result.left
     entries = list(result.entries if entries is None else entries)
     actions = []

@@ -411,7 +411,7 @@ class RemoverPage(ModulePage):
         self.progress.setValue(0)
         self.status("刪除中...")
         # Capture sizes BEFORE deletion - files no longer exist afterwards.
-        self._pending_size = sum(f.size for f in selected)
+        self._pending_size_map = {f.path: f.size for f in selected}
         self._op_started = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
         self.del_worker = DeletionWorker(selected, permanent=permanent)
         self.del_worker.progress.connect(lambda d, t: self.progress.setValue(d))
@@ -436,7 +436,12 @@ class RemoverPage(ModulePage):
         self.cancel_del_btn.setEnabled(False)
         self.select_all_btn.setEnabled(True)
         finished = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-        size_freed = self._pending_size
+        # Recycle Bin moves do not actually free disk space.
+        size_freed = (
+            sum(self._pending_size_map.get(path, 0) for path in deleted)
+            if permanent else 0
+        )
+        self._pending_size_map = {}
         log = self._log.save_logs(
             self.folder.text(), self.chips.selected(), deleted, failed,
             self._op_started, finished, size_freed=size_freed)
@@ -458,7 +463,10 @@ class RemoverPage(ModulePage):
         self._show_summary(len(deleted), len(failed), size_freed, failed)
         self.task_finish(
             self._task,
-            status="done" if not failed else "failed",
+            status=(
+                "cancelled" if self.del_worker and self.del_worker._cancelled
+                else "done" if not failed else "failed"
+            ),
             message=f"刪除 {len(deleted)} · 失敗 {len(failed)}",
         )
         self._task = None

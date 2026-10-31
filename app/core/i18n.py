@@ -727,7 +727,17 @@ class Localizer(QObject):
     def _translate_list(self, widget):
         if widget.objectName() in ("searchRoots", "favoritesList"):
             return
-        viewport = widget.viewport().rect()
+        import PyQt6.sip as sip
+
+        try:
+            if sip.isdeleted(widget):
+                return
+        except (TypeError, RuntimeError):
+            return
+        try:
+            viewport = widget.viewport().rect()
+        except RuntimeError:
+            return
         for index in range(widget.count()):
             item = widget.item(index)
             rect = widget.visualItemRect(item)

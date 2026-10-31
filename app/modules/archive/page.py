@@ -412,8 +412,14 @@ class ArchivePage(ModulePage):
         self.worker.start()
 
     def _on_created(self, summary):
-        status = "cancelled" if summary.get("cancelled") else "done"
+        status = (
+            "cancelled" if summary.get("cancelled")
+            else "done" if summary.get("committed")
+            else "failed"
+        )
         message = f"加入 {summary['added']} 個檔案 · 失敗 {summary['failed']}"
+        if not summary.get("committed"):
+            message += " · 未更新輸出 ZIP（保留舊檔）"
         self.task_finish(self._task, status=status, message=message)
         self._task = None
         record_operation(

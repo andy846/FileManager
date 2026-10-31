@@ -21,6 +21,6 @@ jobs:
       - name: Run pytest
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+        run: python -m pytest -q -vv
       - name: Run Ruff
         run: python -m ruff check app

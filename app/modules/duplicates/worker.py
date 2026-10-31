@@ -4,7 +4,7 @@ from PyQt6.QtCore import pyqtSignal
 
 from app.core.workers import BaseWorker, CancelledError
 from app.modules.duplicates.scanner import find_duplicates
-from app.core.utils import send_to_trash
+from app.modules.remover.deleter import delete_files
 
 
 class DuplicatesWorker(BaseWorker):
@@ -58,25 +58,10 @@ class CleanupWorker(BaseWorker):
         self.threads = threads
 
     def run(self):
-        import concurrent.futures
-
-        deleted, failed = [], []
-        done = 0
-        total = len(self.paths)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.threads) as pool:
-            futs = {pool.submit(send_to_trash, p): p for p in self.paths}
-            try:
-                for fut in concurrent.futures.as_completed(futs):
-                    path = futs[fut]
-                    self.control.checkpoint()
-                    ok, err = fut.result()
-                    if ok:
-                        deleted.append(path)
-                    else:
-                        failed.append((path, err))
-                    done += 1
-                    self.cleanup_progress.emit(done, total)
-            except CancelledError:
-                self.cleanup_complete.emit(deleted, failed)
-                return
+        deleted, failed = delete_files(
+            self.paths,
+            cancel_check=self.control.checkpoint,
+            progress_callback=lambda done, total: self.cleanup_progress.emit(done, total),
+            threads=self.threads,
+        )
         self.cleanup_complete.emit(deleted, failed)

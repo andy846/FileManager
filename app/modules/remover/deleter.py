@@ -1,7 +1,6 @@
 """Pure, Qt-free deletion engine for the Remover module."""
 
 import os
-import threading
 from concurrent.futures import (
     CancelledError as FutureCancelledError,
     FIRST_COMPLETED, ThreadPoolExecutor, wait,

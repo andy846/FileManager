@@ -3,6 +3,7 @@
 import os
 import stat
 import tarfile
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -87,9 +88,11 @@ def _safe_target(dest, member_name):
     if relative is None:
         return None
     target = os.path.abspath(os.path.join(dest, *relative.split("/")))
-    dest_abs = os.path.abspath(dest)
+    # Resolve existing junctions and symlinks before touching the filesystem.
+    dest_real = os.path.normcase(os.path.realpath(os.path.abspath(dest)))
+    target_real = os.path.normcase(os.path.realpath(target))
     try:
-        if os.path.commonpath([target, dest_abs]) != dest_abs:
+        if os.path.commonpath([target_real, dest_real]) != dest_real:
             return None
     except ValueError:
         return None
@@ -103,6 +106,28 @@ def _check_bomb(path, members):
         raise ValueError("壓縮檔解壓後超過安全大小上限")
     if total > 200 * 1024 ** 2 and total / archive_size > MAX_RATIO:
         raise ValueError("壓縮比異常，已拒絕解壓（可能的 zip bomb）")
+
+
+def _write_stream_atomically(source, target, control=None):
+    """Write one member to a unique sibling temp file and replace on success."""
+    folder = os.path.dirname(target) or "."
+    fd, temp = tempfile.mkstemp(prefix=".fm-extract-", suffix=".part", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            while True:
+                if control is not None:
+                    control.wait_if_paused()
+                    control.checkpoint()
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+        if control is not None:
+            control.checkpoint()
+        os.replace(temp, target)
+    finally:
+        if os.path.lexists(temp):
+            os.unlink(temp)
 
 
 def extract_archive(path, dest, members=None, overwrite=False,
@@ -134,20 +159,16 @@ def extract_archive(path, dest, members=None, overwrite=False,
                     if member.is_dir:
                         os.makedirs(target, exist_ok=True)
                     else:
-                        if os.path.exists(target) and not overwrite:
+                        if os.path.lexists(target) and not overwrite:
                             summary["skipped"] += 1
                         else:
                             os.makedirs(os.path.dirname(target) or dest,
                                         exist_ok=True)
-                            with archive.open(member.name) as source, \
-                                    open(target, "wb") as output:
-                                while True:
-                                    chunk = source.read(1024 * 1024)
-                                    if not chunk:
-                                        break
-                                    if control is not None:
-                                        control.checkpoint()
-                                    output.write(chunk)
+                            if _safe_target(dest, member.name) != target:
+                                summary["skipped"] += 1
+                                continue
+                            with archive.open(member.name) as source:
+                                _write_stream_atomically(source, target, control)
                             summary["extracted"] += 1
                     if progress is not None:
                         progress(index, total, member.name)
@@ -165,23 +186,20 @@ def extract_archive(path, dest, members=None, overwrite=False,
                     if info.isdir():
                         os.makedirs(target, exist_ok=True)
                     else:
-                        if os.path.exists(target) and not overwrite:
+                        if os.path.lexists(target) and not overwrite:
                             summary["skipped"] += 1
                         else:
                             os.makedirs(os.path.dirname(target) or dest,
                                         exist_ok=True)
+                            if _safe_target(dest, member.name) != target:
+                                summary["skipped"] += 1
+                                continue
                             source = archive.extractfile(info)
                             if source is None:
                                 summary["skipped"] += 1
                                 continue
-                            with source, open(target, "wb") as output:
-                                while True:
-                                    chunk = source.read(1024 * 1024)
-                                    if not chunk:
-                                        break
-                                    if control is not None:
-                                        control.checkpoint()
-                                    output.write(chunk)
+                            with source:
+                                _write_stream_atomically(source, target, control)
                             summary["extracted"] += 1
                     if progress is not None:
                         progress(index, total, member.name)
@@ -223,11 +241,14 @@ def create_zip(output, sources, control=None, progress=None):
                     continue
                 entries.append((full, os.path.relpath(full, parent)))
 
-    os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
+    folder = os.path.dirname(output) or "."
+    os.makedirs(folder, exist_ok=True)
     summary = {"added": 0, "failed": 0, "output": output,
-               "cancelled": False}
+               "cancelled": False, "committed": False}
+    fd, temp = tempfile.mkstemp(prefix=".fm-zip-", suffix=".part", dir=folder)
+    os.close(fd)
     try:
-        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(temp, "w", zipfile.ZIP_DEFLATED) as archive:
             for index, (path, arcname) in enumerate(entries, 1):
                 if control is not None:
                     control.wait_if_paused()
@@ -239,6 +260,15 @@ def create_zip(output, sources, control=None, progress=None):
                     summary["failed"] += 1
                 if progress is not None:
                     progress(index, len(entries), path)
+        if control is not None:
+            control.checkpoint()
+        # Never replace a valid existing archive with an incomplete new one.
+        if not summary["failed"]:
+            os.replace(temp, output)
+            summary["committed"] = True
     except CancelledError:
         summary["cancelled"] = True
+    finally:
+        if os.path.lexists(temp):
+            os.unlink(temp)
     return summary

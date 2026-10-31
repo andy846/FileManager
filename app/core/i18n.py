@@ -204,6 +204,16 @@ def _contains_cjk(text):
     return any("\u4e00" <= char <= "\u9fff" for char in text)
 
 
+def _widget_alive(widget):
+    """Return False for PyQt wrappers whose C++ object was already deleted."""
+    try:
+        import PyQt6.sip as sip
+
+        return not sip.isdeleted(widget)
+    except (TypeError, RuntimeError):
+        return False
+
+
 def _looks_like_path(text):
     return (
         "\\" in text
@@ -523,6 +533,8 @@ class Localizer(QObject):
             return
         try:
             if isinstance(root, QWidget):
+                if not _widget_alive(root):
+                    return
                 if not force and not root.isVisible():
                     return
                 self._translate_widget(root)
@@ -530,6 +542,8 @@ class Localizer(QObject):
             else:
                 widgets = root.findChildren(QWidget)
             for widget in widgets:
+                if not _widget_alive(widget):
+                    continue
                 if not force and not widget.isVisible():
                     continue
                 try:
@@ -542,6 +556,8 @@ class Localizer(QObject):
             return
 
     def _translate_widget(self, widget):
+        if not _widget_alive(widget):
+            return
         data_label = widget.objectName() in (
             "chartDataLabel", "previewDataLabel"
         )

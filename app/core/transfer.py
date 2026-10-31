@@ -66,9 +66,8 @@ def _commit_file(temp, dst, conflict="overwrite", backup_overwrite=None,
     """Commit *temp* to *dst* atomically, enforcing the conflict policy.
 
     The decision and the commit happen under one lock, so concurrent
-    transfers inside this process cannot race each other. ``os.rename`` is
-    used for non-overwrite modes because it refuses to clobber an existing
-    target, closing the check-then-act gap against external writers too.
+    transfers inside this process cannot race each other. A no-replace
+    operation also protects the destination from external writers.
     """
     final = dst
     while True:
@@ -85,7 +84,13 @@ def _commit_file(temp, dst, conflict="overwrite", backup_overwrite=None,
                 os.replace(extended_path(temp), extended_path(final))
             else:
                 try:
-                    os.rename(extended_path(temp), extended_path(final))
+                    if sys.platform.startswith("win"):
+                        os.rename(extended_path(temp), extended_path(final))
+                    else:
+                        # POSIX rename replaces existing files. Link creates
+                        # the destination exclusively on the same filesystem.
+                        os.link(extended_path(temp), extended_path(final))
+                        os.unlink(extended_path(temp))
                 except FileExistsError:
                     if conflict == "rename":
                         final = _next_available_path(final)

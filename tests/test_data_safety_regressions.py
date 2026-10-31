@@ -98,6 +98,29 @@ def test_skip_mode_never_overwrites_existing_destination(tmp_path):
     assert source.read_bytes() == b"NEW"
 
 
+def test_skip_commit_preserves_destination_created_after_check(tmp_path, monkeypatch):
+    import app.core.transfer as transfer
+
+    temp = tmp_path / "temporary"
+    target = tmp_path / "target"
+    temp.write_bytes(b"NEW")
+    real_lexists = transfer.os.path.lexists
+
+    def race(path):
+        if str(path) == str(target) and not real_lexists(path):
+            target.write_bytes(b"OTHER PROCESS")
+            return False
+        return real_lexists(path)
+
+    monkeypatch.setattr(transfer.os.path, "lexists", race)
+    monkeypatch.setattr(transfer.sys, "platform", "linux")
+    monkeypatch.setattr(transfer.os, "rename", transfer.os.replace)
+    with pytest.raises(DestinationExistsError):
+        transfer._commit_file(str(temp), str(target), conflict="skip")
+    assert target.read_bytes() == b"OTHER PROCESS"
+    assert temp.read_bytes() == b"NEW"
+
+
 def test_concurrent_skip_commits_exactly_once(tmp_path):
     source_a = tmp_path / "a.bin"
     source_b = tmp_path / "b.bin"

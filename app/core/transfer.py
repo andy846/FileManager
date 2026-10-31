@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from ctypes import wintypes
 
@@ -29,6 +30,15 @@ TRANSIENT_NETWORK_ERRORS = {
 _NATIVE = None
 
 _PROGRESS_CALLBACK = None
+
+# Serialize destination commits within this process. Striped locks avoid
+# unbounded memory growth from keeping one lock per target filename.
+_DESTINATION_LOCKS = [threading.Lock() for _ in range(256)]
+
+
+def _destination_lock(path):
+    key = os.path.normcase(os.path.abspath(path))
+    return _DESTINATION_LOCKS[hash(key) % len(_DESTINATION_LOCKS)]
 
 
 class _NativeApi:
@@ -245,7 +255,8 @@ def copy_file(src, dst, control=None, verify="quick", retries=1,
             _verify_file(src, temp, size, mode=verify, control=control)
             if control is not None:
                 control.checkpoint()
-            os.replace(extended_path(temp), extended_path(dst))
+            with _destination_lock(dst):
+                os.replace(extended_path(temp), extended_path(dst))
         except BaseException:
             _remove_quietly(temp)
             raise
@@ -272,7 +283,8 @@ def move_file(src, dst, control=None, verify="quick", retries=1,
 
     if _same_device(src, dst):
         def _rename():
-            os.replace(extended_path(src), extended_path(dst))
+            with _destination_lock(dst):
+                os.replace(extended_path(src), extended_path(dst))
             # A rename does not change file content, so only the size needs
             # checking; avoid re-reading a potentially large network file.
             _verify_file(dst, dst, size, mode="size", control=control)

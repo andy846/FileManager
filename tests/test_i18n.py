@@ -89,7 +89,7 @@ def test_english_localizer_translates_shell(app):
         localizer.translate_all()
         QTest.qWait(40)
         localizer.translate_all()
-        assert window.windowTitle() == "FileManager v2.1.0"
+        assert window.windowTitle() == "FileManager v2.1.1"
         assert window.nav_items[MODULE_DASHBOARD].text(0) == "Dashboard"
         assert window.nav_items[MODULE_COPY].text(0) == "Batch copy / move"
         assert window.collapse_btn.text() == "Collapse sidebar"

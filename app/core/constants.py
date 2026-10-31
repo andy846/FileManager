@@ -4,10 +4,10 @@ import os
 
 APP_NAME = "FileManager 檔案管理系統"
 APP_TITLE = "檔案管理系統"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 # Must stay in sync with filevers/prodvers in version_info.txt; enforced by
 # tests/test_packaging.py so the exe metadata cannot drift from the UI.
-APP_VERSION_TUPLE = (2, 1, 0, 0)
+APP_VERSION_TUPLE = (2, 1, 1, 0)
 ORG_NAME = "FileManager"
 APP_ID = "FileManager/2.1"
 

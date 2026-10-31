@@ -699,29 +699,23 @@ class Localizer(QObject):
                 translated = tr(header.text(column))
                 if translated != header.text(column):
                     header.setText(column, translated)
-        viewport = tree.viewport().rect()
         if tree.objectName() == "duplicatesTree":
             for i in range(tree.topLevelItemCount()):
                 item = tree.topLevelItem(i)
-                rect = tree.visualItemRect(item)
-                if rect.isValid() and viewport.intersects(rect):
-                    text = item.text(0)
-                    translated = tr(text)
-                    if translated != text:
-                        item.setText(0, translated)
+                text = item.text(0)
+                translated = tr(text)
+                if translated != text:
+                    item.setText(0, translated)
             return
         for i in range(tree.topLevelItemCount()):
             item = tree.topLevelItem(i)
-            self._translate_tree_item(tree, item, viewport)
+            self._translate_tree_item(tree, item)
         for i in range(tree.topLevelItemCount()):
             parent = tree.topLevelItem(i)
             for j in range(parent.childCount()):
-                self._translate_tree_item(tree, parent.child(j), viewport)
+                self._translate_tree_item(tree, parent.child(j))
 
-    def _translate_tree_item(self, tree, item, viewport):
-        rect = tree.visualItemRect(item)
-        if not rect.isValid() or not viewport.intersects(rect):
-            return
+    def _translate_tree_item(self, tree, item):
         name = tree.objectName()
         if name == "navTree":
             columns = range(tree.columnCount())
@@ -743,21 +737,11 @@ class Localizer(QObject):
     def _translate_list(self, widget):
         if widget.objectName() in ("searchRoots", "favoritesList"):
             return
-        import PyQt6.sip as sip
-
-        try:
-            if sip.isdeleted(widget):
-                return
-        except (TypeError, RuntimeError):
-            return
-        try:
-            viewport = widget.viewport().rect()
-        except RuntimeError:
+        if not _widget_alive(widget):
             return
         for index in range(widget.count()):
             item = widget.item(index)
-            rect = widget.visualItemRect(item)
-            if not rect.isValid() or not viewport.intersects(rect):
+            if item is None:
                 continue
             translated = tr(item.text())
             if translated != item.text():

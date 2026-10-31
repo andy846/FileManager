@@ -379,6 +379,26 @@ def test_mirror_delete_rejects_new_source_file(tmp_path, monkeypatch):
     assert victim.read_text() == "existing target"
 
 
+def test_mirror_delete_rejects_roots_that_now_overlap(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    source = target / "source"
+    source.mkdir(parents=True)
+    victim = target / "extra.txt"
+    victim.write_text("keep")
+    import app.core.compare as compare_module
+
+    monkeypatch.setattr(compare_module, "send_to_trash", lambda _: pytest.fail("delete"))
+    worker = SyncWorker([{
+        "action": "delete", "dst": str(victim), "relative": "extra.txt",
+        "source_root": str(source), "target_root": str(target),
+    }])
+    summaries = []
+    worker.completed.connect(summaries.append)
+    worker.run()
+    assert summaries[0]["failed"] == 1
+    assert victim.read_text() == "keep"
+
+
 def test_cancelled_extraction_keeps_original_file(tmp_path):
     archive_path = tmp_path / "new.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:

@@ -426,6 +426,8 @@ def _validate_delete_target(action):
         return "目標資料夾已無法存取，已拒絕刪除"
     if not os.path.isdir(extended_path(source_root)):
         return "來源資料夾已無法存取，已拒絕鏡像刪除"
+    if _roots_overlap(source_root, target_root):
+        return "同步來源與目標已重疊，已拒絕鏡像刪除"
     try:
         with os.scandir(extended_path(source_root)):
             pass

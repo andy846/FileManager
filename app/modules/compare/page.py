@@ -136,13 +136,19 @@ class SyncPreviewDialog(QDialog):
     def _update_preview(self):
         entries = (self.selected_entries if self.use_selection.isChecked()
                    and self.selected_entries else self.result.entries)
-        self.actions = build_sync_plan(
-            self.result, self.direction.currentData(), entries=entries,
-            include_only=self.only.isChecked(),
-            include_newer=self.newer.isChecked(),
-            include_diff=self.diff.isChecked(),
-            mirror=self.mirror.isChecked(),
-        )
+        try:
+            self.actions = build_sync_plan(
+                self.result, self.direction.currentData(), entries=entries,
+                include_only=self.only.isChecked(),
+                include_newer=self.newer.isChecked(),
+                include_diff=self.diff.isChecked(),
+                mirror=self.mirror.isChecked(),
+            )
+        except ValueError as exc:
+            self.actions = []
+            self.preview.setPlainText(f"已停止建立同步計劃：{exc}")
+            self.count_label.setText("不可執行")
+            return
         lines = []
         for action in self.actions:
             kind = action["action"]
@@ -492,10 +498,14 @@ class ComparePage(ModulePage):
         if not entries:
             QMessageBox.information(self, "複製", "請先選取要複製的差異項目。")
             return
-        actions = build_sync_plan(
-            self.result, direction, entries=entries, include_only=True,
-            include_newer=True, include_diff=True, mirror=False,
-        )
+        try:
+            actions = build_sync_plan(
+                self.result, direction, entries=entries, include_only=True,
+                include_newer=True, include_diff=True, mirror=False,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "同步已停止", str(exc))
+            return
         self._run_actions(actions)
 
     def _open_sync_preview(self):

@@ -11,7 +11,7 @@ from app.core.utils import send_to_trash
 
 def delete_files(files, cancel_check=None, progress_callback=None,
                  file_deleted_callback=None, file_failed_callback=None,
-                 permanent=False, threads=None):
+                 permanent=False, threads=None, include_cancelled=False):
     """Delete files with bounded parallelism and honest cancellation results.
 
     Only `threads` jobs are ever in flight. Cancellation prevents any
@@ -28,6 +28,7 @@ def delete_files(files, cancel_check=None, progress_callback=None,
     threads = max(1, int(threads))
     deleted = []
     failed = []
+    cancelled_paths = []
     done = 0
     total = len(files)
     iterator = iter(files)
@@ -55,6 +56,18 @@ def delete_files(files, cancel_check=None, progress_callback=None,
     with ThreadPoolExecutor(max_workers=threads) as pool:
         pending = {}
 
+        def mark_cancelled():
+            nonlocal cancelled
+            if cancelled:
+                return
+            cancelled = True
+            # Anything still in the iterator was never submitted.
+            cancelled_paths.extend(_path(item) for item in iterator)
+            # Queued futures that have not started yet are safely cancelled.
+            for future, item in list(pending.items()):
+                if future.cancel():
+                    cancelled_paths.append(_path(item))
+
         def submit_next():
             nonlocal cancelled
             if cancelled:
@@ -66,7 +79,7 @@ def delete_files(files, cancel_check=None, progress_callback=None,
             except StopIteration:
                 return False
             except CancelledError:
-                cancelled = True
+                mark_cancelled()
                 return False
             future = pool.submit(_do, item)
             pending[future] = item
@@ -84,7 +97,10 @@ def delete_files(files, cancel_check=None, progress_callback=None,
                 try:
                     error = future.result()
                 except (CancelledError, FutureCancelledError):
-                    cancelled = True
+                    # The running task observed cancellation before deleting.
+                    if include_cancelled:
+                        cancelled_paths.append(path)
+                    mark_cancelled()
                     continue
                 except Exception as exc:
                     error = str(exc)
@@ -105,7 +121,7 @@ def delete_files(files, cancel_check=None, progress_callback=None,
                 try:
                     cancel_check()
                 except CancelledError:
-                    cancelled = True
+                    mark_cancelled()
 
             if cancelled:
                 for future in pending:
@@ -115,4 +131,6 @@ def delete_files(files, cancel_check=None, progress_callback=None,
                     if not submit_next():
                         break
 
+    if include_cancelled:
+        return deleted, failed, cancelled_paths
     return deleted, failed

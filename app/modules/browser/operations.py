@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 
 from app.core.file_ops import is_within, unique_path
 from app.core.i18n import tr
-from app.core.transfer import copy_file, move_file
+from app.core.transfer import DestinationExistsError, copy_file, move_file
 from app.core.utils import (
     extended_path, format_size, normalize_path, short_path,
     strip_extended_path,
@@ -159,15 +159,23 @@ class FileOpsWorker(QThread):
         if skip:
             return "skipped", 0, ""
         if self.operation == "copy":
-            copy_file(
-                entry["src"], dst, control=self.control,
-                verify=self.verify_mode, retries=self.retries,
-            )
+            try:
+                copy_file(
+                    entry["src"], dst, control=self.control,
+                    verify=self.verify_mode, retries=self.retries,
+                    conflict=self.conflict,
+                )
+            except DestinationExistsError:
+                return "skipped", 0, "目標已存在"
         else:
-            move_file(
-                entry["src"], dst, control=self.control,
-                verify=self.verify_mode, retries=self.retries,
-            )
+            try:
+                move_file(
+                    entry["src"], dst, control=self.control,
+                    verify=self.verify_mode, retries=self.retries,
+                    conflict=self.conflict,
+                )
+            except DestinationExistsError:
+                return "skipped", 0, "目標已存在"
         return "done", int(entry.get("size", 0) or 0), ""
 
     def run(self):

@@ -568,15 +568,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
         # request_stop() uses bounded waits; never destroy a running QThread.
-        active = []
-        for page in self.pages:
-            for value in vars(page).values():
-                if isinstance(value, QThread) and value.isRunning():
-                    active.append(value)
-        active.extend(
-            thread for thread in self.findChildren(QThread)
-            if thread.isRunning() and thread not in active
-        )
+        active = self._running_threads()
         if active:
             event.ignore()
             QMessageBox.information(
@@ -588,3 +580,29 @@ class MainWindow(QMainWindow):
         self.settings.save_geometry(self.saveGeometry())
         self.settings.q.sync()
         super().closeEvent(event)
+
+    def _running_threads(self):
+        """Collect every detectable running QThread, including dialog-owned
+        and unparented workers that findChildren() cannot see."""
+        active = []
+        seen = set()
+        candidates = list(self.pages)
+        application = QApplication.instance()
+        if application is not None:
+            candidates.extend(application.allWidgets())
+        candidates.extend(self.findChildren(QWidget))
+        for widget in candidates:
+            try:
+                values = vars(widget).values()
+            except TypeError:
+                continue
+            for value in values:
+                if isinstance(value, QThread) and value.isRunning() \
+                        and id(value) not in seen:
+                    seen.add(id(value))
+                    active.append(value)
+        for thread in self.findChildren(QThread):
+            if thread.isRunning() and id(thread) not in seen:
+                seen.add(id(thread))
+                active.append(thread)
+        return active

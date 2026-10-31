@@ -4,6 +4,8 @@ import ctypes
 import os
 import shutil
 import sys
+import tempfile
+import threading
 import time
 from ctypes import wintypes
 
@@ -28,6 +30,77 @@ TRANSIENT_NETWORK_ERRORS = {
 _NATIVE = None
 
 _PROGRESS_CALLBACK = None
+
+# Serialize destination commits within this process. Striped locks avoid
+# unbounded memory growth from keeping one lock per target filename.
+_DESTINATION_LOCKS = [threading.Lock() for _ in range(256)]
+
+
+def _destination_lock(path):
+    key = os.path.normcase(os.path.abspath(path))
+    return _DESTINATION_LOCKS[hash(key) % len(_DESTINATION_LOCKS)]
+
+
+class DestinationExistsError(OSError):
+    """Raised when a skip-mode commit would overwrite an existing file."""
+
+    def __init__(self, path):
+        super().__init__(f"目標已存在: {path}")
+        self.path = path
+
+
+def _next_available_path(path):
+    """Return a sibling path that does not exist yet (``name (1).ext``)."""
+    folder, name = os.path.split(path)
+    stem, ext = os.path.splitext(name)
+    index = 1
+    while True:
+        candidate = os.path.join(folder, f"{stem} ({index}){ext}")
+        if not os.path.lexists(extended_path(candidate)):
+            return candidate
+        index += 1
+
+
+def _commit_file(temp, dst, conflict="overwrite", backup_overwrite=None,
+                 on_commit=None):
+    """Commit *temp* to *dst* atomically, enforcing the conflict policy.
+
+    The decision and the commit happen under one lock, so concurrent
+    transfers inside this process cannot race each other. A no-replace
+    operation also protects the destination from external writers.
+    """
+    final = dst
+    while True:
+        with _destination_lock(final):
+            exists = os.path.lexists(extended_path(final))
+            if exists and conflict == "skip":
+                raise DestinationExistsError(final)
+            if exists and conflict == "rename":
+                final = _next_available_path(final)
+                continue
+            if exists and conflict == "overwrite":
+                if backup_overwrite is not None:
+                    backup_overwrite(final)
+                os.replace(extended_path(temp), extended_path(final))
+            else:
+                try:
+                    if sys.platform.startswith("win"):
+                        os.rename(extended_path(temp), extended_path(final))
+                    else:
+                        # POSIX rename replaces existing files. Link creates
+                        # the destination exclusively on the same filesystem.
+                        os.link(extended_path(temp), extended_path(final))
+                        os.unlink(extended_path(temp))
+                except FileExistsError:
+                    if conflict == "rename":
+                        final = _next_available_path(final)
+                    elif conflict == "skip":
+                        raise DestinationExistsError(final)
+                    # overwrite: re-run the decision, now replacing the target.
+                    continue
+            if on_commit is not None:
+                on_commit(final)
+            return final
 
 
 class _NativeApi:
@@ -204,7 +277,8 @@ def _same_device(src, dst):
 
 
 def copy_file(src, dst, control=None, verify="quick", retries=1,
-              preserve_metadata=True, chunk_size=COPY_CHUNK_SIZE):
+              preserve_metadata=True, chunk_size=COPY_CHUNK_SIZE,
+              conflict="overwrite", backup_overwrite=None, on_commit=None):
     """Copy one file atomically, verify it, and return its size.
 
     The copy is written to a ``.tmp~`` file first so a failed verification
@@ -220,9 +294,13 @@ def copy_file(src, dst, control=None, verify="quick", retries=1,
         raise ValueError("來源與目標相同")
     parent = os.path.dirname(dst) or "."
     os.makedirs(extended_path(parent), exist_ok=True)
-    temp = f"{dst}.tmp~"
-    _remove_quietly(temp)
     size = os.path.getsize(extended_path(src))
+    # A shared .tmp~ name lets concurrent jobs delete or corrupt each other.
+    fd, temp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(dst)}.", suffix=".tmp~",
+        dir=extended_path(parent),
+    )
+    os.close(fd)
 
     def _attempt():
         try:
@@ -238,7 +316,12 @@ def copy_file(src, dst, control=None, verify="quick", retries=1,
                 except OSError:
                     pass
             _verify_file(src, temp, size, mode=verify, control=control)
-            os.replace(extended_path(temp), extended_path(dst))
+            if control is not None:
+                control.checkpoint()
+            _commit_file(
+                temp, dst, conflict=conflict,
+                backup_overwrite=backup_overwrite, on_commit=on_commit,
+            )
         except BaseException:
             _remove_quietly(temp)
             raise
@@ -249,7 +332,8 @@ def copy_file(src, dst, control=None, verify="quick", retries=1,
 
 
 def move_file(src, dst, control=None, verify="quick", retries=1,
-              preserve_metadata=True):
+              preserve_metadata=True, conflict="overwrite",
+              backup_overwrite=None, on_commit=None):
     """Move one file, using an atomic rename on the same device."""
     src = normalize_path(src)
     dst = normalize_path(dst)
@@ -265,10 +349,13 @@ def move_file(src, dst, control=None, verify="quick", retries=1,
 
     if _same_device(src, dst):
         def _rename():
-            os.replace(extended_path(src), extended_path(dst))
+            final = _commit_file(
+                src, dst, conflict=conflict,
+                backup_overwrite=backup_overwrite, on_commit=on_commit,
+            )
             # A rename does not change file content, so only the size needs
             # checking; avoid re-reading a potentially large network file.
-            _verify_file(dst, dst, size, mode="size", control=control)
+            _verify_file(final, final, size, mode="size", control=control)
             return size
 
         return retry_operation(_rename, attempts=retries,
@@ -276,7 +363,8 @@ def move_file(src, dst, control=None, verify="quick", retries=1,
 
     copy_file(
         src, dst, control=control, verify=verify, retries=retries,
-        preserve_metadata=preserve_metadata,
+        preserve_metadata=preserve_metadata, conflict=conflict,
+        backup_overwrite=backup_overwrite, on_commit=on_commit,
     )
 
     def _remove():

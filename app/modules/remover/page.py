@@ -278,6 +278,7 @@ class RemoverPage(ModulePage):
         self.scan_worker.progress.connect(self._on_scan_progress)
         self.scan_worker.file_found.connect(self._on_file_found)
         self.scan_worker.scan_complete.connect(self._on_scan_complete)
+        self.scan_worker.scan_warnings.connect(self._on_scan_warnings)
         self.scan_worker.error.connect(self._on_scan_error)
         self.scan_worker.start()
         self._task = self.task_add(
@@ -356,6 +357,16 @@ class RemoverPage(ModulePage):
         self._task = None
         self.status(f"掃描完成: {len(self.files)} 個檔案")
 
+    def _on_scan_warnings(self, count):
+        if not count:
+            return
+        self.status(f"掃描時有 {count} 個資料夾無法讀取", 10000)
+        QMessageBox.warning(
+            self, "掃描不完整",
+            f"有 {count} 個資料夾無法讀取，掃描結果可能不完整。\n"
+            "已列出成功讀取的檔案；請確認後再執行刪除。",
+        )
+
     def _on_cancel_scan(self):
         if self.scan_worker:
             self.scan_worker.cancel()
@@ -411,12 +422,12 @@ class RemoverPage(ModulePage):
         self.progress.setValue(0)
         self.status("刪除中...")
         # Capture sizes BEFORE deletion - files no longer exist afterwards.
-        self._pending_size = sum(f.size for f in selected)
+        self._pending_size_map = {f.path: f.size for f in selected}
         self._op_started = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
         self.del_worker = DeletionWorker(selected, permanent=permanent)
         self.del_worker.progress.connect(lambda d, t: self.progress.setValue(d))
         self.del_worker.delete_complete.connect(
-            lambda d, f: self._on_delete_complete(d, f, permanent))
+            lambda d, f, c: self._on_delete_complete(d, f, c, permanent))
         self.del_worker.start()
         self._task = self.task_add(
             "delete", f"刪除 {len(selected)} 個檔案",
@@ -429,17 +440,23 @@ class RemoverPage(ModulePage):
             )
         )
 
-    def _on_delete_complete(self, deleted, failed, permanent):
+    def _on_delete_complete(self, deleted, failed, cancelled, permanent):
         self.deleting = False
         self.progress.setVisible(False)
         self.delete_btn.setEnabled(True)
         self.cancel_del_btn.setEnabled(False)
         self.select_all_btn.setEnabled(True)
         finished = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-        size_freed = self._pending_size
+        # Recycle Bin moves do not actually free disk space.
+        size_freed = (
+            sum(self._pending_size_map.get(path, 0) for path in deleted)
+            if permanent else 0
+        )
+        self._pending_size_map = {}
         log = self._log.save_logs(
             self.folder.text(), self.chips.selected(), deleted, failed,
-            self._op_started, finished, size_freed=size_freed)
+            self._op_started, finished, size_freed=size_freed,
+            cancelled=cancelled)
         # remove deleted rows from table
         deleted_set = set(deleted)
         keep = [f for f in self.files if f.path not in deleted_set]
@@ -458,11 +475,20 @@ class RemoverPage(ModulePage):
         self._show_summary(len(deleted), len(failed), size_freed, failed)
         self.task_finish(
             self._task,
-            status="done" if not failed else "failed",
-            message=f"刪除 {len(deleted)} · 失敗 {len(failed)}",
+            status=(
+                "cancelled" if self.del_worker and self.del_worker._cancelled
+                else "done" if not failed else "failed"
+            ),
+            message=(
+                f"刪除 {len(deleted)} · 失敗 {len(failed)}"
+                f" · 已取消 {len(cancelled)}"
+            ),
         )
         self._task = None
-        self.status(f"完成: 刪除 {len(deleted)} 個, 失敗 {len(failed)} 個")
+        self.status(
+            f"完成: 刪除 {len(deleted)} 個, 失敗 {len(failed)} 個, "
+            f"已取消 {len(cancelled)} 個"
+        )
 
     def _show_summary(self, deleted, failed, size_freed, failed_list):
         dlg = QDialog(self)

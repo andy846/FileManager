@@ -219,6 +219,17 @@ def _minimal_paths(paths):
     return selected
 
 
+def _roots_overlap(left, right):
+    """Reject identical, nested, or junction-aliased sync roots."""
+    left = os.path.normcase(os.path.realpath(os.path.abspath(left)))
+    right = os.path.normcase(os.path.realpath(os.path.abspath(right)))
+    try:
+        common = os.path.commonpath((left, right))
+    except ValueError:  # Different Windows drives.
+        return False
+    return common in (left, right)
+
+
 def build_sync_plan(result, direction, entries=None, include_only=True,
                     include_newer=True, include_diff=True, mirror=False):
     """Build copy/mkdir/delete actions for one sync direction.
@@ -228,10 +239,22 @@ def build_sync_plan(result, direction, entries=None, include_only=True,
     """
     if direction not in ("l2r", "r2l"):
         raise ValueError("direction must be l2r or r2l")
+    if _roots_overlap(result.left, result.right):
+        raise ValueError("同步來源與目標不可相同、互相包含或指向同一位置")
+    if mirror and result.errors:
+        raise ValueError(
+            f"資料夾比對有 {result.errors} 個無法讀取項目，已禁止鏡像刪除"
+        )
     target_root = result.right if direction == "l2r" else result.left
+    source_root = result.left if direction == "l2r" else result.right
     entries = list(result.entries if entries is None else entries)
     actions = []
     target_only = []
+
+    def _action(**fields):
+        fields["source_root"] = source_root
+        fields["target_root"] = target_root
+        return fields
 
     for entry in entries:
         if entry.status == STATUS_SAME:
@@ -248,11 +271,11 @@ def build_sync_plan(result, direction, entries=None, include_only=True,
             target_exists = bool(entry.left_path)
 
         if entry.status == STATUS_TYPE_CONFLICT:
-            actions.append({
-                "action": "conflict",
-                "relative": entry.relative,
-                "message": "類型衝突（檔案／資料夾）",
-            })
+            actions.append(_action(
+                action="conflict",
+                relative=entry.relative,
+                message="類型衝突（檔案／資料夾）",
+            ))
             continue
 
         if entry.status == STATUS_ONLY_LEFT or entry.status == STATUS_ONLY_RIGHT:
@@ -285,30 +308,30 @@ def build_sync_plan(result, direction, entries=None, include_only=True,
         if source_exists and not target_exists and entry.status in (
                 STATUS_ONLY_LEFT, STATUS_ONLY_RIGHT):
             if source_is_dir:
-                actions.append({
-                    "action": "mkdir", "dst": destination,
-                    "relative": entry.relative,
-                })
+                actions.append(_action(
+                    action="mkdir", dst=destination,
+                    relative=entry.relative,
+                ))
                 continue
         if source_is_dir and target_exists:
             continue
         if source_is_dir:
-            actions.append({
-                "action": "mkdir", "dst": destination,
-                "relative": entry.relative,
-            })
+            actions.append(_action(
+                action="mkdir", dst=destination,
+                relative=entry.relative,
+            ))
         else:
-            actions.append({
-                "action": "copy", "src": source_path, "dst": destination,
-                "relative": entry.relative,
-            })
+            actions.append(_action(
+                action="copy", src=source_path, dst=destination,
+                relative=entry.relative,
+            ))
 
     if mirror:
         for path in _minimal_paths(target_only):
-            actions.append({
-                "action": "delete", "dst": path,
-                "relative": os.path.relpath(path, target_root),
-            })
+            actions.append(_action(
+                action="delete", dst=path,
+                relative=os.path.relpath(path, target_root),
+            ))
 
     actions.sort(key=lambda item: (
         0 if item["action"] == "mkdir" else 1 if item["action"] == "copy" else 2,
@@ -358,6 +381,14 @@ class SyncWorker(QThread):
                         )
                         summary["copied"] += 1
                     elif kind == "delete":
+                        reason = _validate_delete_target(action)
+                        if reason:
+                            summary["failed"] += 1
+                            summary["errors"].append(
+                                (action["dst"], reason))
+                            self.progress.emit(
+                                index, total, action.get("relative", kind))
+                            continue
                         ok, error = send_to_trash(action["dst"])
                         if ok:
                             summary["deleted"] += 1
@@ -376,3 +407,48 @@ class SyncWorker(QThread):
         except CancelledError:
             summary["cancelled"] = True
         self.completed.emit(summary)
+
+
+def _validate_delete_target(action):
+    """Re-validate roots and containment immediately before a mirror delete.
+
+    A scan can go stale between planning and execution: the source root may
+    have been removed (turning mirror into a blind wipe) or the target may
+    have been replaced by a junction into the source tree. Both cases must
+    abort the destructive action instead of deleting.
+    """
+    target_root = action.get("target_root")
+    source_root = action.get("source_root")
+    path = action.get("dst", "")
+    if not target_root or not source_root or not path:
+        return "缺少同步根目錄資訊，已拒絕刪除"
+    if not os.path.isdir(extended_path(target_root)):
+        return "目標資料夾已無法存取，已拒絕刪除"
+    if not os.path.isdir(extended_path(source_root)):
+        return "來源資料夾已無法存取，已拒絕鏡像刪除"
+    try:
+        with os.scandir(extended_path(source_root)):
+            pass
+    except OSError:
+        return "來源資料夾已無法讀取，已拒絕鏡像刪除"
+    real_path = os.path.normcase(os.path.realpath(os.path.abspath(path)))
+    real_target = os.path.normcase(os.path.realpath(os.path.abspath(target_root)))
+    real_source = os.path.normcase(os.path.realpath(os.path.abspath(source_root)))
+    try:
+        if os.path.commonpath([real_path, real_target]) != real_target:
+            return "刪除目標已超出同步目標資料夾，已拒絕刪除"
+        if os.path.commonpath([real_path, real_source]) == real_source:
+            return "刪除目標指向來源資料夾，已拒絕刪除"
+    except ValueError:
+        return "路徑位於不同磁碟，已拒絕刪除"
+    relative = os.path.relpath(os.path.abspath(path), os.path.abspath(target_root))
+    source_path = os.path.join(source_root, relative)
+    try:
+        os.lstat(extended_path(source_path))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return "無法確認來源項目，已拒絕鏡像刪除"
+    else:
+        return "來源項目已存在，已拒絕鏡像刪除"
+    return ""

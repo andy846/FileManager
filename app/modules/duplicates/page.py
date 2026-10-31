@@ -454,7 +454,10 @@ class DuplicatesPage(ModulePage):
                          len(failed), size_freed)
         self.task_finish(
             self._task,
-            status="done" if not failed else "failed",
+            status=(
+                "cancelled" if self.control and self.control.is_cancelled()
+                else "done" if not failed else "failed"
+            ),
             message=f"清理 {len(deleted)} · 失敗 {len(failed)}"
                     f" · {format_size(size_freed)}",
         )

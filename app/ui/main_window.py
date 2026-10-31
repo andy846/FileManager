@@ -1,11 +1,12 @@
 """Application shell: grouped sidebar, stacked modules, tasks and palette."""
 
-from PyQt6.QtCore import QSignalBlocker, QSize, Qt
+from PyQt6.QtCore import QSignalBlocker, QSize, Qt, QThread
 from PyQt6.QtGui import QKeySequence, QShortcut, QColor, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QMainWindow, QWidget, QHBoxLayout,
     QVBoxLayout, QListWidget, QListWidgetItem, QTreeWidget,
     QTreeWidgetItem, QStackedWidget, QLabel, QStatusBar, QToolButton,
+    QMessageBox,
 )
 
 from app.core.constants import (
@@ -566,6 +567,42 @@ class MainWindow(QMainWindow):
                     page.request_stop()
                 except Exception:
                     pass
+        # request_stop() uses bounded waits; never destroy a running QThread.
+        active = self._running_threads()
+        if active:
+            event.ignore()
+            QMessageBox.information(
+                self, "仍有檔案操作進行中",
+                "已要求背景工作停止；部分磁碟或網路操作尚未完成。"
+                "為保障檔案完整性，暫時不會關閉程式，請稍後再關閉。",
+            )
+            return
         self.settings.save_geometry(self.saveGeometry())
         self.settings.q.sync()
         super().closeEvent(event)
+
+    def _running_threads(self):
+        """Collect every detectable running QThread, including dialog-owned
+        and unparented workers that findChildren() cannot see."""
+        active = []
+        seen = set()
+        candidates = list(self.pages)
+        application = QApplication.instance()
+        if application is not None:
+            candidates.extend(application.allWidgets())
+        candidates.extend(self.findChildren(QWidget))
+        for widget in candidates:
+            try:
+                values = vars(widget).values()
+            except TypeError:
+                continue
+            for value in values:
+                if isinstance(value, QThread) and value.isRunning() \
+                        and id(value) not in seen:
+                    seen.add(id(value))
+                    active.append(value)
+        for thread in self.findChildren(QThread):
+            if thread.isRunning() and id(thread) not in seen:
+                seen.add(id(thread))
+                active.append(thread)
+        return active

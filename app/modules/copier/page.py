@@ -686,13 +686,14 @@ class CopierPage(ModulePage):
         done = summary.get("done", 0) if isinstance(summary, dict) else 0
         skipped = summary.get("skipped", 0) if isinstance(summary, dict) else 0
         failed = summary.get("failed", 0) if isinstance(summary, dict) else 0
+        cancelled = summary.get("cancelled", 0) if isinstance(summary, dict) else 0
         bts = summary.get("bytes", 0) if isinstance(summary, dict) else 0
         elapsed = summary.get("elapsed", 0) if isinstance(summary, dict) else 0
         action = tr("已複製" if operation == "copy" else "已搬移")
         msg = (
             f"{tr('完成')}: {tr('成功')} {done} / {tr('已跳過')} {skipped}"
-            f" / {tr('失敗')} {failed} | {action} {format_size(bts)}"
-            f" | {tr('耗時')} {elapsed:.1f}s"
+            f" / {tr('失敗')} {failed} / {tr('已取消')} {cancelled}"
+            f" | {action} {format_size(bts)} | {tr('耗時')} {elapsed:.1f}s"
         )
         self.status(msg, 8000)
         if cancelled:

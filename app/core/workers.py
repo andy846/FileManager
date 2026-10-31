@@ -15,27 +15,32 @@ class OperationControl:
     def __init__(self):
         self._cancel = threading.Event()
         self._pause = threading.Event()
+        self._resume = threading.Event()
+        self._resume.set()
         self._bytes_lock = threading.Lock()
         self._count_lock = threading.Lock()
 
     def cancel(self):
         self._cancel.set()
+        self._resume.set()  # Unblock a paused worker so it can exit.
 
     def is_cancelled(self):
         return self._cancel.is_set()
 
     def pause(self):
+        self._resume.clear()
         self._pause.set()
 
     def resume(self):
         self._pause.clear()
+        self._resume.set()
 
     def is_paused(self):
         return self._pause.is_set()
 
     def wait_if_paused(self):
         while self._pause.is_set() and not self._cancel.is_set():
-            self._pause.wait(0.2)
+            self._resume.wait(0.2)
 
     def checkpoint(self):
         """Raise CancelledError if cancelled (call inside worker loops)."""
@@ -45,6 +50,7 @@ class OperationControl:
     def reset(self):
         self._cancel.clear()
         self._pause.clear()
+        self._resume.set()
 
 
 def atomic_copy(src, dst, chunk_size=512 * 1024, fsync=False, control=None):

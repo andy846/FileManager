@@ -1,31 +1,46 @@
 """Pure, Qt-free deletion engine for the Remover module."""
 
 import os
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    CancelledError as FutureCancelledError,
+    FIRST_COMPLETED, ThreadPoolExecutor, wait,
+)
 
 from app.core.utils import send_to_trash
 
 
 def delete_files(files, cancel_check=None, progress_callback=None,
                  file_deleted_callback=None, file_failed_callback=None,
-                 permanent=False, threads=None):
-    """Delete / trash the given files, optionally in parallel.
+                 permanent=False, threads=None, include_cancelled=False):
+    """Delete files with bounded parallelism and honest cancellation results.
 
-    Returns ``(deleted, failed)`` where each is a list of paths (and
-    ``failed`` holds ``(path, error)`` tuples).
+    Only `threads` jobs are ever in flight. Cancellation prevents any
+    additional submissions, including work that has not started yet.
+    Running operations cannot be interrupted; their outcomes are still
+    included in the returned audit lists.
     """
+    from app.core.workers import CancelledError
+
     if threads is None:
         import multiprocessing
 
         threads = min(8, max(4, (multiprocessing.cpu_count() or 4)))
+    threads = max(1, int(threads))
     deleted = []
     failed = []
-    lock = threading.Lock()
+    cancelled_paths = []
     done = 0
     total = len(files)
+    iterator = iter(files)
+    cancelled = False
 
-    def _do(path):
+    def _path(item):
+        return item.path if hasattr(item, "path") else item
+
+    def _do(item):
+        if cancel_check:
+            cancel_check()  # Check at the last possible point before deletion.
+        path = _path(item)
         if permanent:
             try:
                 if os.path.isdir(path) and not os.path.islink(path):
@@ -35,35 +50,87 @@ def delete_files(files, cancel_check=None, progress_callback=None,
                 return None
             except Exception as exc:
                 return str(exc)
-        else:
-            ok, err = send_to_trash(path)
-            return None if ok else err
-
-    from app.core.workers import CancelledError
+        ok, err = send_to_trash(path)
+        return None if ok else err
 
     with ThreadPoolExecutor(max_workers=threads) as pool:
-        futures = {pool.submit(_do, f.path if hasattr(f, "path") else f): f
-                   for f in files}
-        try:
-            for fut in as_completed(futures):
+        pending = {}
+
+        def mark_cancelled():
+            nonlocal cancelled
+            if cancelled:
+                return
+            cancelled = True
+            # Anything still in the iterator was never submitted.
+            cancelled_paths.extend(_path(item) for item in iterator)
+            # Queued futures that have not started yet are safely cancelled.
+            for future, item in list(pending.items()):
+                if future.cancel():
+                    cancelled_paths.append(_path(item))
+
+        def submit_next():
+            nonlocal cancelled
+            if cancelled:
+                return False
+            try:
                 if cancel_check:
                     cancel_check()
-                f = futures[fut]
-                path = f.path if hasattr(f, "path") else f
-                err = fut.result()
-                with lock:
-                    done += 1
-                if err:
-                    failed.append((path, err))
+                item = next(iterator)
+            except StopIteration:
+                return False
+            except CancelledError:
+                mark_cancelled()
+                return False
+            future = pool.submit(_do, item)
+            pending[future] = item
+            return True
+
+        for _ in range(min(threads, total)):
+            if not submit_next():
+                break
+
+        while pending:
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                item = pending.pop(future)
+                path = _path(item)
+                try:
+                    error = future.result()
+                except (CancelledError, FutureCancelledError):
+                    # The running task observed cancellation before deleting.
+                    if include_cancelled:
+                        cancelled_paths.append(path)
+                    mark_cancelled()
+                    continue
+                except Exception as exc:
+                    error = str(exc)
+
+                done += 1
+                if error:
+                    failed.append((path, error))
                     if file_failed_callback:
-                        file_failed_callback(path, err)
+                        file_failed_callback(path, error)
                 else:
                     deleted.append(path)
                     if file_deleted_callback:
                         file_deleted_callback(path)
                 if progress_callback:
                     progress_callback(done, total)
-        except CancelledError:
-            # Stop collecting results; return whatever was processed so far.
-            return deleted, failed
+
+            if not cancelled and cancel_check:
+                try:
+                    cancel_check()
+                except CancelledError:
+                    mark_cancelled()
+
+            if cancelled:
+                for future in pending:
+                    future.cancel()
+            else:
+                for _ in finished:
+                    if not submit_next():
+                        break
+
+    if include_cancelled:
+        return deleted, failed, cancelled_paths
     return deleted, failed

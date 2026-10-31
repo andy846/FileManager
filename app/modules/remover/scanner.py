@@ -25,7 +25,7 @@ def _to_timestamp(qdate):
 
 def scan_files(folder, extensions, filters, recursive=True,
                progress_callback=None, file_found_callback=None,
-               cancel_check=None):
+               cancel_check=None, on_error=None):
     """Scan *folder* for files matching the given filters.
 
     ``filters`` keys: date_from, date_to (QDate|None), size_op
@@ -49,7 +49,14 @@ def scan_files(folder, extensions, filters, recursive=True,
 
     results = []
     count = 0
-    for root, dirs, files in os.walk(extended_path(folder)):
+
+    def _record_walk_error(error):
+        if on_error is not None:
+            path = getattr(error, "filename", folder)
+            on_error(path, error)
+
+    for root, dirs, files in os.walk(
+            extended_path(folder), onerror=_record_walk_error):
         root = normalize_path(strip_extended_path(root))
         if not recursive:
             dirs[:] = []

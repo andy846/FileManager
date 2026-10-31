@@ -8,5 +8,6 @@ build/
 dist/
 *.log
 build_out.txt
+FileManager-v*.zip
 .coverage
 htmlcov/

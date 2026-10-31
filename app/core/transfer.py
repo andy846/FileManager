@@ -4,6 +4,7 @@ import ctypes
 import os
 import shutil
 import sys
+import tempfile
 import time
 from ctypes import wintypes
 
@@ -220,9 +221,13 @@ def copy_file(src, dst, control=None, verify="quick", retries=1,
         raise ValueError("來源與目標相同")
     parent = os.path.dirname(dst) or "."
     os.makedirs(extended_path(parent), exist_ok=True)
-    temp = f"{dst}.tmp~"
-    _remove_quietly(temp)
     size = os.path.getsize(extended_path(src))
+    # A shared .tmp~ name lets concurrent jobs delete or corrupt each other.
+    fd, temp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(dst)}.", suffix=".tmp~",
+        dir=extended_path(parent),
+    )
+    os.close(fd)
 
     def _attempt():
         try:
@@ -238,6 +243,8 @@ def copy_file(src, dst, control=None, verify="quick", retries=1,
                 except OSError:
                     pass
             _verify_file(src, temp, size, mode=verify, control=control)
+            if control is not None:
+                control.checkpoint()
             os.replace(extended_path(temp), extended_path(dst))
         except BaseException:
             _remove_quietly(temp)

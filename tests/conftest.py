@@ -10,6 +10,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest  # noqa: E402  (must follow the env setup above)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def isolate_settings(tmp_path_factory):
+    from PyQt6.QtCore import QSettings
+
+    settings_dir = str(tmp_path_factory.mktemp("settings"))
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
+                      settings_dir)
+
+
 @pytest.fixture
 def sample_tree(tmp_path):
     """Create a small file tree for scanning tests."""
